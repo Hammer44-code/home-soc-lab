@@ -1,0 +1,77 @@
+<!--
+  ============================================================================
+  Sysmon configuration — Home SOC Lab
+  ============================================================================
+
+  This file is a THIN WRAPPER around SwiftOnSecurity's community Sysmon config.
+  It is deliberately short so that it is easy to audit and so that upstream
+  updates can be pulled in cleanly.
+
+  ## What to do
+
+  1. Download the latest upstream config:
+
+       https://github.com/SwiftOnSecurity/sysmon-config/blob/master/sysmonconfig-export.xml
+
+     (Direct raw link:
+      https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml)
+
+  2. Save it as `setup/sysmon-config.xml` in this repo, overwriting this stub.
+
+  3. Install / update Sysmon on the Windows victim with an elevated PowerShell:
+
+       .\Sysmon64.exe -accepteula -i sysmon-config.xml      # first install
+       .\Sysmon64.exe -c sysmon-config.xml                   # update config
+
+  4. Confirm the service is running and populating the Operational channel:
+
+       Get-Service sysmon64
+       Get-WinEvent -LogName 'Microsoft-Windows-Sysmon/Operational' -MaxEvents 5
+
+  ## Why SwiftOnSecurity's config
+
+  It's the de facto community baseline: broad process / network / image-load
+  coverage, sensible exclusions for common Windows noise, and active
+  maintenance. Olaf Hartong's `sysmon-modular` is a more advanced alternative
+  (rule-by-rule composition) and is an obvious upgrade path once this lab has
+  real detection volume to tune against.
+
+  ## Credit & licensing
+
+  Upstream config by @SwiftOnSecurity and contributors. Distributed under the
+  MIT License in the upstream repository. This wrapper introduces no changes;
+  once you replace this stub with the upstream XML, attribution remains with
+  the SwiftOnSecurity project.
+
+  Reference: https://github.com/SwiftOnSecurity/sysmon-config
+
+  ## Lab-specific tuning
+
+  After the first week of baseline telemetry, consider the following targeted
+  edits to the upstream config (track each as a separate commit so diffs are
+  reviewable):
+
+    - Raise logging on `RuleName="T1003"` LSASS access — default excludes too
+      many svchost variants for a detection lab.
+    - Ensure EventID 11 (FileCreate) captures `C:\Windows\Tasks\*` and
+      `C:\Windows\System32\Tasks\*` for the T1053.005 scheduled-task work.
+    - Do not strip DNS logging (EventID 22) — it powers the living-off-the-
+      land reconnaissance investigation in Sprint 4.
+
+  Leave a note in this file header describing every tuning change so future
+  readers know what diverged from upstream.
+  ============================================================================
+-->
+
+<!--
+  STUB: replace this comment block with the upstream SwiftOnSecurity XML
+  before installing. The file is intentionally non-functional as committed so
+  that a misconfigured install fails loudly rather than silently shipping an
+  empty policy.
+-->
+<Sysmon schemaversion="4.90">
+  <!-- REPLACE ME with SwiftOnSecurity/sysmon-config contents -->
+  <EventFiltering>
+    <!-- Intentionally empty. Do not install this stub as-is. -->
+  </EventFiltering>
+</Sysmon>

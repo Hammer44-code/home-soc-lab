@@ -227,6 +227,36 @@ Two operational notes:
 
 ---
 
+## 10. Weighted-score alert for noisy, multi-shape techniques
+
+```spl
+... EventCode=1 Image="*\\cmd.exe"
+| eval susp_parent = if(match(ParentImage, "(?i)\\\\(winword|excel|mshta|wscript|cscript)\.exe$"), 3, 0)
+| eval encoded_ps  = if(match(CommandLine, "(?i)(powershell|pwsh)\b") AND match(CommandLine, "(?i)\s-(e|en|enc|...|encodedcommand)\s"), 3, 0)
+| eval obfuscation = if(match(CommandLine, "(?i)(\^|%comspec%|%[a-z0-9_]+:~)"), 2, 0)
+| eval stdin_redir = if(match(CommandLine, "(?i)\s/r\b") OR match(CommandLine, "(?i)\bcmd(\.exe)?\s*<"), 2, 0)
+| eval script_drop = if(match(CommandLine, "(?i)>\s*\S+\.(vbs|js|hta|bat|ps1)\b"), 2, 0)
+| eval recon_chain = if(match(CommandLine, "(?i)\b(whoami|ipconfig|systeminfo)\b"), 1, 0)
+| eval score = susp_parent + encoded_ps + obfuscation + stdin_redir + script_drop + recon_chain
+| where score >= 2
+| sort - score, - _time
+```
+
+**Why.** Some techniques are too noisy for a single `| where` and too *varied* for the burst pattern (§ none — that's T1087/T1082). `cmd.exe` (T1059.003) is the case study: the binary runs thousands of times a day benignly, and "malicious cmd" has many unrelated shapes (Office-spawned, encoded-PS hand-off, env-var obfuscation, stdin-redirection, script-dropping). No one regex separates good from bad. The weighted score encodes the analyst's triage model directly — *where did this shell come from, and what is it about to do* — as additive evidence, then thresholds the sum. The output is a **ranked queue** (`sort - score`), not a binary alarm.
+
+**The two design rules that make it work** (both learned validating T1059.003):
+
+1. **One technique trips one flag, so the threshold must be ≤ the smallest "should-alert" weight.** Each sub-technique lights exactly one indicator, so a single-technique event scores just that flag's weight. I first set `threshold=3` with the obfuscation flag at weight 2 — and the canonical "suspicious execution" atomic (weight 2) silently missed. Fix: threshold `>= 2`. The bigger weights (3) no longer change *whether* something fires — they rank the queue (Office-macro-plus-encoded-PS = 6 sits above lone obfuscation = 2). Keep the lowest-signal corroborator (`recon_chain`) at weight 1 so it stays *below* threshold alone but tips a borderline event over.
+2. **Decorate-don't-drop for the hunting twin** (see § 8). Ship two SPLs: a classifier that emits every flag as `yes/no` and drops nothing (hunting), and the scored `where score >= N` (the alert). Same split as the burst detections.
+
+**The pre-flight that saved the detection.** Before running anything, dump the *actual* atomic commands with `Invoke-AtomicTest <T> -ShowDetails` and hand-score them against the draft. This caught two fatal gaps on paper: (a) the threshold-vs-weight bug above, and (b) two whole sub-techniques (stdin-redirection, script-dropping) the draft had no flag for — they'd have scored 0 and "validated" as false negatives. **Lesson: for a multi-shape detection, read the test payloads and predict each score before you execute.** Same family as the §1 "confirm the data is in the index first" lesson — verify your assumptions cheaply before the expensive loop.
+
+**ART harness caveat worth carrying forward.** Atomic Red Team parents every atomic under its runner (`powershell.exe`), so any flag keyed on a *suspicious parent* is structurally unexercisable via ART — it can only be reasoned about, not lab-proven. Note which flags your test harness can and cannot exercise.
+
+**When you reach for it.** A high-volume binary/event class with several independent malicious shapes and no clean single discriminator — `cmd.exe`, `rundll32.exe`, `regsvr32.exe`, `wmic.exe`, LOLBin execution generally. If the technique instead manifests as *repetition* of similar commands, use the burst-correlation pattern (T1087/T1082) instead; if it's a single sharp signature, a plain `| where` is enough.
+
+---
+
 ## Quirks & gotchas
 
 - **Time picker syntax** — `earliest=-15m` goes in the **initial search line**, not after a `|`. Easier to just use the time picker dropdown. (Memory from Sprint 2.)
@@ -242,7 +272,8 @@ EIDs I've used so far in this lab:
 
 | EID | Channel | What it means | Used in |
 |---|---|---|---|
-| 1 | Sysmon | Process create | T1059.001, T1053.005 |
+| 1 | Sysmon | Process create | T1059.001, T1053.005, T1087, T1082, T1059.003 |
+| 13 | Sysmon | Registry value set | T1547.001 (Run-key tripwire) |
 | 10 | Sysmon | Process access (handle open) | T1003.001 |
 | 11 | Sysmon | File create | T1053.005 (Tasks folder pivot) |
 | 4624 | Security | Successful logon | (Sprint 3 — needs `Splunk_TA_windows`) |

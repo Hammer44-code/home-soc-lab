@@ -257,9 +257,35 @@ Two operational notes:
 
 ---
 
+## 11. Tool-agnostic "effect" tripwire vs. process attribution
+
+```spl
+* Primary (the alert): trip on the SERVICE-WRITTEN effect event, whatever the tool
+index=endpoint ((sourcetype="WinEventLog:Security" EventCode=1102)
+             OR (sourcetype="WinEventLog:System"   EventCode=104))
+
+* Secondary (attribution only): the COMMAND that caused it, with a positive classifier
+index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+  (CommandLine="*wevtutil*" OR CommandLine="*Clear-EventLog*" OR ...)
+| eval method=case( match(Image,"(?i)\\\\wevtutil\.exe$") AND match(CommandLine,"(?i)\s(cl|clear-log)\b"), "wevtutil clear-log", ... )
+| where isnotnull(method)
+```
+
+**Why.** Some techniques produce an event written by *the OS service itself* as the action completes — EID 1102/104 for a log clear (T1070.001), EID 13 for a registry Run-key write (T1547.001). That event fires **regardless of which tool the adversary used** (`wevtutil`, PowerShell, WMI, raw API), so it's the highest-fidelity, lowest-evasion signal available — the alert. Anchor on the **effect**, not the **actor**. Pair it with a Sysmon EID 1 *attribution* search that identifies the process responsible — knowing it can only see clears that spawn a process (a direct-API clear from injected code produces the 1102 but no EID 1). The event tripwire is the safety net; the process layer adds who/parent.
+
+**Two rules learned validating T1070.001:**
+
+1. **A positive classifier + `| where isnotnull(method)` beats a `1=1` catch-all** for the attribution search. The first draft ended its `case` with `1=1, "other indicator"` to surface unknown variants — and a routine **Windows Defender platform update** (which shells out ~25× to `wevtutil.exe install-manifest`/`uninstall-manifest` to re-register ETW manifests, as `SYSTEM` under `MsMpEng.exe`) flooded straight into it. `wevtutil` is not only a log-clear tool. Classify on the **verb** (`cl`/`clear-log`, §3 anchoring), drop anything unclassified, and rely on the effect-tripwire to catch genuinely novel methods.
+2. **Security-channel field extraction is uneven by EID.** EID **1102** auto-extracts `Account_Name`/`Domain_Name`/`Security_ID` cleanly with no TA (contrast the §2 4624 gotcha). EID **104** (System channel) carries the clearer as a bare `Sid` only — no name until `Splunk_TA_windows` adds SID→name resolution. Table the SID so attribution survives the missing name. And confirm the *exact* field label against a real event: 1102's message says `Domain Name:`, not `Account Domain:` — a hand-written rex on the wrong label fails silently.
+
+**When you reach for it.** Any technique whose *result* is recorded by a Windows service in a dedicated event (log clear, Run-key write, service install EID 7045, scheduled-task create EID 4698). Trip on that event; attribute with EID 1.
+
+---
+
 ## Quirks & gotchas
 
 - **Time picker syntax** — `earliest=-15m` goes in the **initial search line**, not after a `|`. Easier to just use the time picker dropdown. (Memory from Sprint 2.)
+- **`wevtutil` is not only a log-clear tool** — Windows Defender platform updates spawn ~25 `wevtutil.exe install-manifest`/`uninstall-manifest` calls (re-registering ETW manifests for updated `Mp*.dll`/`WdFilter.sys`) under `MsMpEng.exe` as `SYSTEM`. A `*wevtutil*` process filter floods with these during every Defender update — anchor on the clear *verb* (`cl`/`clear-log`), not the binary name (§11, §3).
 - **`_time` vs Sysmon `UtcTime`** — `_time` is Splunk's indexed timestamp displayed in the user's preferred timezone; Sysmon's `UtcTime` field is the on-event UTC string from the source. Both should reference the same instant. If they diverge by hours, the source VM's timezone is wrong (Win10 default is sometimes Pacific even on a host in another zone — bit me on 2026-06-02).
 - **`NOT_TRANSLATED` in event header** — Splunk's WinEventLog parser couldn't resolve the channel publisher's name (often the SYSTEM SID). Cosmetic only; the real per-process `User` field further down is correct.
 - **Stale events from hung tests** — if an ART test hits an interactive prompt and times out, partial events still land in the index. Always check the timestamps when validating: today's run vs the leftover hung-run events from earlier.
@@ -278,6 +304,8 @@ EIDs I've used so far in this lab:
 | 11 | Sysmon | File create | T1053.005 (Tasks folder pivot) |
 | 4624 | Security | Successful logon | (Sprint 3 — needs `Splunk_TA_windows`) |
 | 4698 | Security | Scheduled task created | T1053.005 (secondary SPL) |
+| 1102 | Security | The audit log was cleared | T1070.001 (primary tripwire) |
+| 104 | System | A non-Security log file was cleared | T1070.001 (primary tripwire) |
 
 **EID 11 surprise** — file writes to `C:\Windows\System32\Tasks\` come from `svchost.exe` (Task Scheduler service), not `schtasks.exe`. A detection that anchors on `Image=*\\schtasks.exe` for EID 11 returns zero. Anchor on `TargetFilename`, not `Image`.
 

@@ -282,6 +282,35 @@ index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" Eve
 
 ---
 
+## 12. Two-stage "plant → trigger" detection (setup event + payoff event)
+
+```spl
+* Primary (the alert): the PAYOFF — an auto-elevating binary spawns an unexpected elevated child
+... EventCode=1 (ParentImage="*\\fodhelper.exe" OR ParentImage="*\\ComputerDefaults.exe" OR ParentImage="*\\control.exe" OR ...)
+| eval method=case(
+    match(ParentImage,"(?i)\\\\(fodhelper|computerdefaults)\.exe$") AND match(Image,"(?i)\\\\(cmd|powershell|...)\.exe$"), "fodhelper/ComputerDefaults elevated child",
+    match(ParentImage,"(?i)\\\\control\.exe$") AND match(Image,"(?i)\\\\(cmd|powershell|...)\.exe$") AND match(IntegrityLevel,"(?i)^(High|System)$"), "sdclt Folder hijack via control.exe",
+    ... )
+| where isnotnull(method)
+
+* Corroborator (coverage backstop): the PLANT — the hijack-key write that precedes the trigger
+... EventCode=13 (TargetObject="*\\ms-settings\\shell\\open\\command\\*" OR TargetObject="*\\mscfile\\shell\\open\\command\\*" OR ...)
+| eval is_delegate=if(match(TargetObject,"(?i)\\\\DelegateExecute$"),"yes","no")
+```
+
+**Why.** Some techniques are not one event but a *sequence*: a **plant** (write a hijack key / config value) followed by a **trigger** that produces the **payoff** (the privileged action). T1548.002 UAC bypass is the case study — plant `HKCU\…\ms-settings\shell\open\command`, then run `fodhelper.exe`, which auto-elevates and spawns your payload at High integrity. This is distinct from §11's effect-tripwire (one fact, two views): here the two events are **two different moments**, and that changes the operational meaning.
+
+**The key insight — the two stages give *complementary coverage*, not just redundant confidence.** The plant (EID 13) happens *before* the trigger, so it fires **even when the bypass is patched/blocked and the payoff never occurs**. Proven live validating T1548.002: the Event Viewer (mscfile) bypass is broken on Win10 19045 — it planted the hijack (corroborator caught it) but ran at **Medium** with no elevation, so the success-only primary correctly stayed silent. Five bypasses planted → five caught by the corroborator; only the three that actually elevated showed in the primary. **Make the payoff event the alert (sharp, low-FP, confirms success); make the plant event the corroborator (fires on the attempt, backstops a failed/patched trigger).**
+
+**Two lessons learned validating T1548.002:**
+
+1. **`IntegrityLevel` separates "attempted" from "succeeded."** A UAC bypass's whole point is medium→High. Every successful bypass child came back `High`; the broken one (Event Viewer) was `Medium`. Table it always; *gate* on it (`match(IntegrityLevel,"(?i)^(High|System)$")`) for the broader, FP-prone parent vectors (`control.exe`) where the parent alone isn't sharp enough.
+2. **Trace the *real* parent chain — it's often a hop deeper than the writeup says.** The sdclt Folder hijack does not spawn its payload as a child of `sdclt.exe`; the chain is `sdclt.exe → control.exe → payload`, so the elevated child's `ParentImage` is **`control.exe`**. A `ParentImage=sdclt.exe` rule misses it entirely. Same family as the §11 / EID-11 `schtasks→svchost` and the T1547 RunOnceEx surprises: **confirm the actual process tree with a diagnostic search before trusting a parent/child rule.** When the primary returns N−1 of the rows you expected, the missing one is usually a parent-shape assumption — dump the tree (`Image`/`ParentImage`/`IntegrityLevel` for the binaries involved) and look.
+
+**When you reach for it.** Any technique with a discrete *setup* artifact followed by a *trigger*: UAC bypasses (registry hijack → auto-elevate binary), COM hijacks (CLSID write → host process loads it), IFEO debugger attachment, AppInit/AppCert DLL registration, persistence-then-execution. Alert on the payoff, backstop with the plant.
+
+---
+
 ## Quirks & gotchas
 
 - **Time picker syntax** — `earliest=-15m` goes in the **initial search line**, not after a `|`. Easier to just use the time picker dropdown. (Memory from Sprint 2.)
@@ -291,6 +320,7 @@ index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" Eve
 - **Stale events from hung tests** — if an ART test hits an interactive prompt and times out, partial events still land in the index. Always check the timestamps when validating: today's run vs the leftover hung-run events from earlier. **Concrete case (T1003.002):** `reg save HKLM\sam %temp%\sam` writes the dump file, then the *next* test that targets the same `%temp%\sam` (`esentutl`, `reg export`) hits "File exists. Overwrite (Yes/No)?" and the ART harness can't answer → the prompt repeats forever. Fix: `Remove-Item "$env:temp\sam","$env:temp\system","$env:temp\security" -Force` between tests, or Ctrl+C out and clean up. The looping test still spawned its process (EID 1 captured) before the prompt.
 - **Service-brokered registry writes break naive attribution (T1562.001).** `Set-MpPreference -DisableRealtimeMonitoring $true` is a *cmdlet* — it spawns **no process** (no EID 1, the §11 blind spot) — and the registry value it changes is written by **`MsMpEng.exe` (Defender's engine) as `NT AUTHORITY\SYSTEM`**, not by the issuing `powershell.exe`. So the EID 13 effect-tripwire catches the *change* but attributes it to the **broker** (`MsMpEng`/`SYSTEM`), never the human actor. Same actor-requests / service-performs handoff as `schtasks→svchost` (T1053.005) and the Run-key writer (T1547.001). **Rule:** when an EID 13/effect event is authored by a *service* process as SYSTEM, the real actor is elsewhere — correlate with PowerShell Script Block Logging (EID 4104) or the session's logon to name them. The effect-tripwire tells you *what changed*; it does not always tell you *who*.
 - **Sysmon renders REG_DWORD as `DWORD (0x00000001)` — anchor on `\b`, not `$`.** The trailing `)` means a regex like `match(Details,"0x0*1$")` never matches (the `$` sits after the paren). Use `match(Details,"(?i)0x0*1\b")` — the word boundary falls between the final `1` and the `)`. `0` (e.g. a re-enable / `$false` write) is `DWORD (0x00000000)`; distinguish the two to tell a malicious *disable* (set to 1) from a benign *re-enable* (set to 0). Same "confirm the exact text against a real event" family as the T1070.001 `Domain Name:` label gotcha.
+- **HKCU class hijacks render as `HKU\<SID>_Classes\…` (T1548.002).** A per-user shell-open-command hijack (`HKCU\Software\Classes\ms-settings\shell\open\command`) is logged by Sysmon EID 13 as `HKU\S-1-5-21-…-1001_Classes\ms-settings\shell\open\command\(Default)` — the HKCU→HKU classes redirection collapses `\Software\Classes\` into a **`<SID>_Classes` suffix on the SID with no backslash separator**. Anchor SPL from `\ms-settings\…` (or the relevant class) onward, not from a `Software\Classes\` path that won't appear. The value write to the key's default renders as `…\command\(Default)` (and `…\command\DelegateExecute`), which is why the SwiftOnSecurity config's generic `\command\` *contains* rule (line 652, `T1042`) catches UAC hijacks even with no UAC-specific rule. Same "confirm the exact rendering against a real event" family as the §11 `Domain Name:` label and the `DWORD (0x…)` paren.
 - **The detection fires on the *attempt*, not the *outcome*.** A process spawns with its full, intent-bearing command line *before* it can fail — so denied/errored malicious commands still produce a clean EID 1 and still classify. Proven repeatedly: `esentutl /vss` erroring with `JET_wrnNyi` (VSS copy not implemented on this Win10 build), `reg export HKLM\security` returning `Access is denied` (SECURITY hive denies Administrators — only `reg save`'s backup privilege bypasses it), and `sc.exe stop WinDefend` being denied (protected service). All three were caught. Never gate a detection on success.
 
 ---
@@ -301,8 +331,8 @@ EIDs I've used so far in this lab:
 
 | EID | Channel | What it means | Used in |
 |---|---|---|---|
-| 1 | Sysmon | Process create | T1059.001, T1053.005, T1087, T1082, T1059.003, T1562.001, T1003.002 |
-| 13 | Sysmon | Registry value set | T1547.001 (Run-key tripwire), T1562.001 (Defender-state tripwire) |
+| 1 | Sysmon | Process create | T1059.001, T1053.005, T1087, T1082, T1059.003, T1562.001, T1003.002, T1548.002 (elevated-child payoff) |
+| 13 | Sysmon | Registry value set | T1547.001 (Run-key tripwire), T1562.001 (Defender-state tripwire), T1548.002 (UAC hijack-key plant) |
 | 10 | Sysmon | Process access (handle open) | T1003.001 |
 | 11 | Sysmon | File create | T1053.005 (Tasks folder pivot) |
 | 4624 | Security | Successful logon | (Sprint 3 — needs `Splunk_TA_windows`) |

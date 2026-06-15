@@ -1,0 +1,4 @@
+# VirtualBox runtime logs (created during VM start)
+*VirtualBoxVM*.log
+*VBoxHeadless*.log
+*.log

@@ -1,0 +1,67 @@
+title: Windows Event Log Cleared (Anti-Forensic Indicator Removal)
+id: 8f1d4e2a-6c3b-4a91-9d7e-1f0b2c5a7e44
+status: experimental
+description: |
+    Detects the clearing of a Windows event log via the service-written "effect"
+    events EID 1102 (Security audit log cleared) and EID 104 (any other channel
+    cleared), both emitted by the Microsoft-Windows-Eventlog service as the clear
+    completes. Because the OS log service — not the clearing tool — writes these
+    records, the rule is tool-agnostic: it fires regardless of whether the clear
+    was performed by wevtutil, Clear-EventLog, WMIC, or a direct EvtClearLog API
+    call. Pair with process-attribution telemetry (Sysmon EID 1) to recover who
+    ran the clear; see the companion lab detection doc.
+references:
+    - https://attack.mitre.org/techniques/T1070/001/
+    - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102
+    - https://lolbas-project.github.io/lolbas/OSBinaries/Wevtutil/
+author: Nolan (home-soc-lab) — validated 2026-06-09
+date: 2026/06/24
+tags:
+    - attack.defense-evasion
+    - attack.t1070.001
+logsource:
+    product: windows
+detection:
+    clear_security:
+        EventID: 1102
+        Provider_Name: Microsoft-Windows-Eventlog
+    clear_other:
+        EventID: 104
+        Provider_Name: Microsoft-Windows-Eventlog
+    condition: clear_security or clear_other
+falsepositives:
+    - Imaging / sysprep / VM provisioning generalization (clears logs as SYSTEM
+      inside a known maintenance window — allowlist the window, not the technique)
+    - Backup / compliance agents that clear a log after archiving it (baseline and
+      suppress the specific service account, not the alert)
+    - A genuine administrator clearing the Application log to reproduce a clean
+      error (rare, attributable — confirm with the human rather than allowlisting)
+level: high
+
+# ---------------------------------------------------------------------------
+# `sigma convert` — Splunk output
+# ---------------------------------------------------------------------------
+# Command:
+#   sigma convert -t splunk clear-event-logs.yml
+#
+# Output (default Splunk backend, source/sourcetype added by a windows pipeline):
+#   source="WinEventLog:*"
+#   ((EventID=1102 Provider_Name="Microsoft-Windows-Eventlog")
+#    OR (EventID=104 Provider_Name="Microsoft-Windows-Eventlog"))
+#
+# ---------------------------------------------------------------------------
+# Mapping to THIS lab's index (validated 2026-06-09)
+# ---------------------------------------------------------------------------
+# Splunk surfaces the numeric field as `EventCode` (not `EventID`), the channel
+# as `SourceName` (not `Provider_Name`), and all events live in `index=endpoint`.
+# Pre-`Splunk_TA_windows` the channels were `WinEventLog:Security` / `:System`;
+# post-TA (2026-06-12) Security+System collapsed into sourcetype `WinEventLog`.
+# The lab-native equivalent of the converted query is therefore:
+#
+#   index=endpoint sourcetype=WinEventLog SourceName="Microsoft-Windows-Eventlog"
+#   (EventCode=1102 OR EventCode=104)
+#
+# The full validated production search (channel-name rex + SID/account
+# attribution + the Sysmon EID 1 process-attribution secondary) lives in
+# ../T1070.001-clear-event-logs.md — this Sigma rule encodes the high-fidelity
+# effect tripwire only, which is intentionally the alert.

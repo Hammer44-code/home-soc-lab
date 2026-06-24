@@ -43,8 +43,8 @@ home-soc-lab/
 ## Table of contents
 
 - [Lab setup](./setup/README.md) — build guide, network design, Sysmon + UF config
-- Detection library — *TBD sprint 2-3*
-- Coverage matrix — *TBD sprint 3*
+- [Detection library](./detections/README.md) — 13 validated, MITRE-mapped detections (SPL + Sigma)
+- [Coverage matrix](./detections/README.md#coverage) — techniques × tactics × severity × status
 - Incident reports — *TBD sprint 4*
 - Automation scripts — *TBD sprint 5*
 - Signature blog post — *TBD sprint 5*

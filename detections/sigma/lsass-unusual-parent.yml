@@ -1,0 +1,90 @@
+title: LSASS Memory Access From an Unusual Source Process (Credential Dumping)
+id: c4a7b218-9e05-4d3f-8b6a-2d91f7c0e533
+status: experimental
+description: |
+    Detects a process opening a handle to lsass.exe with credential-dumping
+    access rights, or with a tell-tale module on the call stack, while excluding
+    the small set of OS components that legitimately access LSASS every boot.
+    Built on Sysmon ProcessAccess (EID 10), which fires on the OpenProcess() call
+    itself — before any memory is read or any .dmp file is written. The
+    GrantedAccess masks listed are the canonical ones that include PROCESS_VM_READ;
+    the CallTrace branch catches comsvcs.dll MiniDump, dbghelp/dbgcore minidump
+    tooling, and reflectively-loaded code (UNKNOWN, no backing DLL on disk).
+references:
+    - https://attack.mitre.org/techniques/T1003/001/
+    - https://lolbas-project.github.io/lolbas/Libraries/Comsvcs/
+    - https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights
+author: Nolan (home-soc-lab) — validated 2026-05-20
+date: 2026/06/24
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+logsource:
+    category: process_access
+    product: windows
+detection:
+    selection_mask:
+        TargetImage|endswith: '\lsass.exe'
+        GrantedAccess:
+            - '0x1010'
+            - '0x1410'
+            - '0x1438'
+            - '0x143a'
+            - '0x1fffff'
+    selection_calltrace:
+        TargetImage|endswith: '\lsass.exe'
+        CallTrace|contains:
+            - 'comsvcs.dll'
+            - 'dbghelp.dll'
+            - 'dbgcore.dll'
+            - 'UNKNOWN'
+    filter_system:
+        SourceImage:
+            - 'C:\Windows\System32\wininit.exe'
+            - 'C:\Windows\System32\csrss.exe'
+            - 'C:\Windows\System32\services.exe'
+            - 'C:\Windows\System32\svchost.exe'
+            - 'C:\Windows\System32\MsMpEng.exe'
+            - 'C:\Program Files\Windows Defender\MsMpEng.exe'
+    condition: (selection_mask or selection_calltrace) and not filter_system
+falsepositives:
+    - EDR / AV agents (CrowdStrike, SentinelOne, Defender for Endpoint, Cylance)
+      legitimately read LSASS — allowlist by full image path AND signing publisher
+    - Task Manager / Sysinternals Process Explorer run as admin request broad
+      access on every enumerated process, including LSASS (noisy on dev hosts)
+    - Endpoint inventory / credential-hygiene scanners (Tanium, BigFix, Lansweeper)
+level: critical
+
+# ---------------------------------------------------------------------------
+# `sigma convert` — Splunk output
+# ---------------------------------------------------------------------------
+# Command:
+#   sigma convert -t splunk -p sysmon lsass-unusual-parent.yml
+#
+# Output (Splunk backend, sysmon pipeline maps category process_access to the
+# Sysmon ProcessAccess source and adds EventCode=10):
+#   source="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=10
+#   (((TargetImage="*\\lsass.exe")
+#     (GrantedAccess IN ("0x1010","0x1410","0x1438","0x143a","0x1fffff")))
+#    OR ((TargetImage="*\\lsass.exe")
+#     (CallTrace IN ("*comsvcs.dll*","*dbghelp.dll*","*dbgcore.dll*","*UNKNOWN*"))))
+#   NOT (SourceImage IN ("C:\\Windows\\System32\\wininit.exe",
+#     "C:\\Windows\\System32\\csrss.exe","C:\\Windows\\System32\\services.exe",
+#     "C:\\Windows\\System32\\svchost.exe","C:\\Windows\\System32\\MsMpEng.exe",
+#     "C:\\Program Files\\Windows Defender\\MsMpEng.exe"))
+#
+# ---------------------------------------------------------------------------
+# Mapping to THIS lab's index (validated 2026-05-20 against ART T1003.001-2)
+# ---------------------------------------------------------------------------
+# Sysmon events stayed on their own sourcetype after the TA install, so the
+# lab-native query just swaps `source=` for `index=endpoint sourcetype=`:
+#
+#   index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+#   EventCode=10 TargetImage="*\\lsass.exe" ...
+#
+# Calibration note: ART test 2 (comsvcs.dll MiniDump) granted 0x1410 — the
+# SURGICAL minimum (QUERY_LIMITED + QUERY + VM_READ), NOT the 0x1fffff
+# PROCESS_ALL_ACCESS most blogs assume. A rule keyed only on the all-access mask
+# would have missed the real event; 0x1410 is in the mask list for that reason.
+# Full validated production SPL + the comsvcs.dll command-line secondary live in
+# ../T1003.001-lsass-access.md.

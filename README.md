@@ -45,7 +45,7 @@ home-soc-lab/
 - [Lab setup](./setup/README.md) — build guide, network design, Sysmon + UF config
 - [Detection library](./detections/README.md) — 13 validated, MITRE-mapped detections (SPL + Sigma)
 - [Coverage matrix](./detections/README.md#coverage) — techniques × tactics × severity × status
-- Incident reports — *TBD sprint 4*
+- [Incident reports](./investigations/README.md) — full Tier 1 investigations (1 flagship multi-stage intrusion + 2 focused)
 - Automation scripts — *TBD sprint 5*
 - Signature blog post — *TBD sprint 5*
 - What I learned — *TBD sprint 5*

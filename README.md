@@ -5,8 +5,9 @@ ingests Windows endpoint telemetry into Splunk, runs Atomic Red Team attack
 simulations against it, and turns the resulting alerts into MITRE-mapped
 detections and end-to-end incident reports.
 
-> **Status:** Sprint 1 — foundation and scaffolding. Detections, investigations,
-> scripts, and the signature blog post land in later sprints.
+> **Status: complete.** 13 validated MITRE-mapped detections (SPL + Sigma), 3
+> full incident investigations, an automation toolkit, and a signature write-up —
+> all built on real telemetry from a reproducible 3-VM lab.
 
 ---
 
@@ -34,8 +35,8 @@ home-soc-lab/
 ├── setup/                    # Lab build guide, Sysmon config, UF inputs, diagram
 ├── detections/               # Per-technique detection write-ups (SPL + Sigma)
 │   └── sigma/                # Vendor-neutral Sigma YAML rules
-├── investigations/           # Full incident reports (INC-2025-00X)
-├── scripts/                  # Python / PowerShell automation helpers
+├── investigations/           # Full incident reports (INC-2026-00X)
+├── scripts/                  # Python automation: detection runner + coverage generator
 ├── notes/                    # SPL cheatsheet and working notes
 └── blog/                     # Signature long-form write-up
 ```
@@ -46,20 +47,56 @@ home-soc-lab/
 - [Detection library](./detections/README.md) — 13 validated, MITRE-mapped detections (SPL + Sigma)
 - [Coverage matrix](./detections/README.md#coverage) — techniques × tactics × severity × status
 - [Incident reports](./investigations/README.md) — full Tier 1 investigations (1 flagship multi-stage intrusion + 2 focused)
-- Automation scripts — *TBD sprint 5*
-- Signature blog post — *TBD sprint 5*
-- What I learned — *TBD sprint 5*
+- [Automation scripts](./scripts/README.md) — Splunk detection runner + coverage-matrix generator
+- [Signature blog post](./blog/clearing-the-logs-told-me-when-you-panicked.md) — why log clearing is futile against a forwarding SIEM
+- [SPL patterns cheatsheet](./notes/splunk-spl-cheatsheet.md) — the reusable SPL idioms behind the detections
+- [What I learned](#what-i-learned)
 
 ## Skills demonstrated
 
-*Filled in progressively as each sprint lands artifacts. Final mapping in Sprint 5.*
+- **SIEM querying & alert triage** — 13 Splunk SPL detections, each tuned through a
+  validate-against-live-telemetry loop; triage judgment shown in
+  [INC-2026-003](./investigations/INC-2026-003-discovery-burst.md) (escalating a
+  noisy signal, and documenting what would have made it benign).
+- **Detection engineering** — [13 detections](./detections/README.md) across 7
+  ATT&CK tactics using a deliberate vocabulary of models (single signature, effect
+  tripwire, burst correlation, weighted score, two-stage plant→trigger), plus
+  portable [Sigma](./detections/sigma/) rules.
+- **Incident investigation & reporting** — a flagship
+  [end-to-end intrusion report](./investigations/INC-2026-001-multistage-intrusion.md)
+  (10 techniques, unified timeline, cross-source correlation, containment) and two
+  focused case reports.
+- **Threat hunting & MITRE ATT&CK mapping** — every detection and incident mapped
+  to ATT&CK tactics/techniques; validated with Atomic Red Team and live
+  network-side attacks (NetExec password spray, smbexec).
+- **Automation & scripting** — a Python [toolkit](./scripts/README.md): a Splunk
+  REST detection-runner and a coverage-matrix generator that keeps docs honest.
+- **Written communication** — detection write-ups, incident reports, and a
+  [signature blog post](./blog/clearing-the-logs-told-me-when-you-panicked.md)
+  pitched at both technical and non-technical readers.
 
-- SIEM querying & alert triage — *TBD sprint 2*
-- Detection engineering — *TBD sprint 2-3*
-- Incident investigation & reporting — *TBD sprint 4*
-- Threat hunting & MITRE ATT&CK mapping — *TBD sprint 3*
-- Malware / network traffic analysis — *TBD sprint 4*
-- Automation & scripting — *TBD sprint 5*
+## What I learned
+
+A few lessons that this lab drove home harder than any course did:
+
+- **Detection is downstream of architecture.** The single highest-leverage decision
+  was forwarding logs off the host in real time — it's what made the attacker's
+  log-clearing futile and preserved the full timeline. The blog post is the long
+  version of this.
+- **Detection writing is the last 20%.** I had a complete, tuned SPL before
+  discovering Sysmon wasn't even logging the event class it needed. *Verify the data
+  is in the index before iterating on the query* became rule zero.
+- **Anchor on the effect, not the tool.** The OS writes an event when an action
+  completes (EID 1102/104 for a log clear, EID 13 for a registry write, EID 7045
+  for a service install) regardless of which tool an attacker used — keying on those
+  is tool-agnostic and nearly evasion-proof.
+- **Field *shape* is where detections quietly break.** Multivalued `User` fields,
+  binaries logged by bare name (`net1` with no `.exe`), the `net.exe`→`net1.exe`
+  wrapper, surgical access masks (`0x1410`, not `0x1FFFFF`) — most of my iteration
+  loops were calibration against the real data's shape, not logic errors.
+- **The boring control beats the clever query.** A Critical, SYSTEM-level,
+  multi-stage intrusion began with one weak admin password. The best preventive
+  control wasn't a detection — it was password policy and account lockout.
 
 ## Credits
 

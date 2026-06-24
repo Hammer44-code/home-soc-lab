@@ -2,3 +2,7 @@
 *VirtualBoxVM*.log
 *VBoxHeadless*.log
 *.log
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,284 @@
+# Detection registry for the home-soc-lab Splunk detection library.
+# Consumed by run_detections.py to fire each detection's PRIMARY search
+# against the Splunk REST API and report hits. The `search` is the exact
+# validated SPL from the matching detection write-up in ../detections/.
+# This file is the single deployable manifest of the library (think of it
+# as a portable savedsearches.conf for the lab).
+#
+# Regenerate/extend by copying a detection's primary ```spl block here.
+
+detections:
+  - id: T1059.001
+    name: PowerShell Encoded Command
+    tactic: Execution
+    severity: High
+    doc: T1059.001-powershell-encoded.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (Image="*\\powershell.exe" OR Image="*\\pwsh.exe" OR OriginalFileName="PowerShell.EXE")
+      | where match(CommandLine, "(?i)\s-(encodedcommand|encodedcomman|encodedcomma|encodedcomm|encodedcom|encodedco|encodedc|encoded|encode|encod|enco|enc|en|e)\s")
+         OR match(CommandLine, "(?i)FromBase64String")
+      | eval encoded_blob=coalesce(
+          mvindex(split(CommandLine, " "), -1),
+          "n/a")
+      | table _time host User ParentImage Image CommandLine encoded_blob Hashes
+      | sort - _time
+
+  - id: T1059.003
+    name: Windows Command Shell
+    tactic: Execution
+    severity: Variable (Low to High)
+    doc: T1059.003-windows-command-shell.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      Image="*\\cmd.exe"
+      | eval susp_parent=if(match(ParentImage, "(?i)\\\\(winword|excel|powerpnt|outlook|onenote|mshta|wscript|cscript|hh|eqnedt32|cmstp|wmiprvse)\.exe$"), "yes", "no")
+      | eval encoded_ps=if(match(CommandLine, "(?i)(powershell|pwsh)\b") AND match(CommandLine, "(?i)\s-(e|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)\s"), "yes", "no")
+      | eval download_exec=if(match(CommandLine, "(?i)\b(certutil|bitsadmin|curl|wget|regsvr32|rundll32|mshta)\b"), "yes", "no")
+      | eval obfuscation=if(match(CommandLine, "(?i)(\^|%comspec%|%[a-z0-9_]+:~)"), "yes", "no")
+      | eval stdin_redir=if(match(CommandLine, "(?i)\s/r\b") OR match(CommandLine, "(?i)\bcmd(\.exe)?\s*<"), "yes", "no")
+      | eval script_drop=if(match(CommandLine, "(?i)>\s*\S+\.(vbs|js|jse|wsf|hta|bat|cmd|ps1)\b"), "yes", "no")
+      | eval recon_chain=if(match(CommandLine, "(?i)\b(whoami|systeminfo|ipconfig|nltest|tasklist|netstat)\b") OR match(CommandLine, "(?i)\bnet1?\s+(user|group|localgroup)\b"), "yes", "no")
+      | eval acct=coalesce(mvindex(mvfilter(User!="NOT_TRANSLATED"),0), User)
+      | table _time host acct ParentImage Image susp_parent encoded_ps download_exec obfuscation stdin_redir script_drop recon_chain CommandLine ParentCommandLine
+      | sort - _time
+
+  - id: T1547.001
+    name: Registry Run Keys
+    tactic: Persistence
+    severity: Medium
+    doc: T1547.001-registry-run-keys.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=13
+      TargetObject="*CurrentVersion\\Run*" OR TargetObject="*Policies\\Explorer\\Run*" OR TargetObject="*CurrentVersion\\Windows\\Run*"
+      | rex field=TargetObject "(?i)\\\\(?<run_key>RunOnceEx|RunServicesOnce|RunServices|RunOnce|Run)\\\\(?<value_name>.+)$"
+      | eval hive=case(match(TargetObject,"(?i)^HKLM"),"HKLM (all users)", match(TargetObject,"(?i)^HKU"),"HKCU (per-user)", 1=1,"other")
+      | eval suspicious_path=if(match(Details, "(?i)(\\\\temp\\\\|\\\\appdata\\\\|\\\\programdata\\\\|\\\\users\\\\public\\\\|\\\\downloads\\\\|%temp%|%appdata%)"), "yes", "no")
+      | eval suspicious_target=if(match(Details, "(?i)(powershell|pwsh|cmd\.exe|rundll32|regsvr32|mshta|wscript|cscript|bitsadmin|certutil|-enc|-e\s|frombase64|iex|invoke-expression)"), "yes", "no")
+      | eval no_extension=if(match(Details, "(?i)\.(exe|dll|bat|cmd|ps1|vbs|js|scr|hta)\b"), "no", "yes")
+      | table _time host Image User run_key value_name Details hive suspicious_path suspicious_target no_extension TargetObject
+      | sort - _time
+
+  - id: T1053.005
+    name: Scheduled Task
+    tactic: Persistence
+    severity: Medium-High
+    doc: T1053.005-scheduled-task.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      Image="*\\schtasks.exe"
+      | where match(CommandLine, "(?i)\s/(create|cr)\s")
+      | rex field=CommandLine "(?i)/TN\s+\"?(?<task_name>[^\"\s]+)"
+      | rex field=CommandLine "(?i)/TR\s+\"(?<task_run_q>[^\"]+)\""
+      | rex field=CommandLine "(?i)/TR\s+(?<task_run_u>[^\"\s]\S*)"
+      | eval task_run=coalesce(task_run_q, task_run_u)
+      | rex field=CommandLine "(?i)/RU\s+\"?(?<task_run_as>[^\"\s]+)"
+      | rex field=CommandLine "(?i)/SC\s+(?<task_schedule>\S+)"
+      | eval suspicious_run_as=if(match(task_run_as, "(?i)^(SYSTEM|S-1-5-18|NT AUTHORITY\\\\SYSTEM)$"), "yes", "no")
+      | eval suspicious_target=if(match(task_run, "(?i)(powershell|cmd\.exe|rundll32|regsvr32|mshta|wscript|cscript|bitsadmin|certutil)"), "yes", "no")
+      | table _time host User ParentImage Image task_name task_run task_run_as task_schedule suspicious_run_as suspicious_target CommandLine
+      | sort - _time
+
+  - id: T1548.002
+    name: Bypass UAC
+    tactic: Privilege Escalation
+    severity: High
+    doc: T1548.002-bypass-uac.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (ParentImage="*\\fodhelper.exe" OR ParentImage="*\\ComputerDefaults.exe"
+       OR ParentImage="*\\eventvwr.exe" OR ParentImage="*\\sdclt.exe" OR ParentImage="*\\control.exe"
+       OR ParentImage="*\\slui.exe" OR ParentImage="*\\wsreset.exe"
+       OR (Image="*\\reg.exe" AND (CommandLine="*EnableLUA*" OR CommandLine="*LocalAccountTokenFilterPolicy*")))
+      | eval method=case(
+          match(ParentImage,"(?i)\\\\(fodhelper|computerdefaults)\.exe$") AND match(Image,"(?i)\\\\(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|wmic|notepad|conhost)\.exe$"), "UAC bypass — fodhelper/ComputerDefaults elevated child (ms-settings hijack)",
+          match(ParentImage,"(?i)\\\\eventvwr\.exe$") AND NOT match(Image,"(?i)\\\\mmc\.exe$"), "UAC bypass — Event Viewer elevated child (mscfile hijack)",
+          match(ParentImage,"(?i)\\\\sdclt\.exe$") AND NOT match(Image,"(?i)\\\\(control|sdclt)\.exe$"), "UAC bypass — sdclt elevated child (Folder hijack)",
+          match(ParentImage,"(?i)\\\\control\.exe$") AND match(Image,"(?i)\\\\(cmd|powershell|pwsh|mshta|rundll32|regsvr32|wscript|cscript)\.exe$") AND match(IntegrityLevel,"(?i)^(High|System)$"), "UAC bypass — sdclt Folder hijack via control.exe (elevated child)",
+          match(ParentImage,"(?i)\\\\(slui|wsreset)\.exe$") AND match(Image,"(?i)\\\\(cmd|powershell|pwsh|mshta|rundll32|regsvr32|wscript|cscript)\.exe$"), "UAC bypass — slui/WSReset elevated child",
+          match(Image,"(?i)\\\\reg\.exe$") AND match(CommandLine,"(?i)\bEnableLUA\b") AND match(CommandLine,"(?i)/d\s+0\b"), "UAC disabled via registry (EnableLUA -> 0)",
+          match(Image,"(?i)\\\\reg\.exe$") AND match(CommandLine,"(?i)\bLocalAccountTokenFilterPolicy\b") AND match(CommandLine,"(?i)/d\s+1\b"), "Remote-UAC token filtering disabled (LocalAccountTokenFilterPolicy -> 1)"
+        )
+      | where isnotnull(method)
+      | eval acct=coalesce(mvindex(mvfilter(User!="NOT_TRANSLATED"),0), User)
+      | table _time host acct method IntegrityLevel Image ParentImage CommandLine ParentCommandLine
+      | sort - _time
+
+  - id: T1562.001
+    name: Impair Defenses
+    tactic: Defense Evasion
+    severity: High
+    doc: T1562.001-impair-defenses.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (CommandLine="*Set-MpPreference*" OR CommandLine="*Add-MpPreference*"
+       OR CommandLine="*DisableRealtimeMonitoring*" OR CommandLine="*DisableAntiSpyware*"
+       OR CommandLine="*DisableBehaviorMonitoring*" OR CommandLine="*DisableIOAVProtection*"
+       OR CommandLine="*DisableScriptScanning*" OR CommandLine="*AttackSurfaceReductionRules_Actions*"
+       OR CommandLine="*ExclusionPath*" OR CommandLine="*ExclusionProcess*" OR CommandLine="*ExclusionExtension*"
+       OR CommandLine="*MpCmdRun*" OR CommandLine="*WinDefend*" OR CommandLine="*RemoveDefinitions*")
+      | eval method=case(
+          match(CommandLine,"(?i)Set-MpPreference") AND match(CommandLine,"(?i)-DisableRealtimeMonitoring\s+\$?(true|1)\b"), "Disable real-time monitoring (Set-MpPreference)",
+          match(CommandLine,"(?i)Set-MpPreference") AND match(CommandLine,"(?i)-Disable(BehaviorMonitoring|IOAVProtection|ScriptScanning|BlockAtFirstSeen)\s+\$?(true|1)\b"), "Disable Defender protection component (Set-MpPreference)",
+          match(CommandLine,"(?i)-AttackSurfaceReductionRules_Actions\s+(Disabled|AuditMode)\b"), "Disable/weaken ASR rule (Set-MpPreference)",
+          match(CommandLine,"(?i)(Add|Set)-MpPreference") AND match(CommandLine,"(?i)-Exclusion(Path|Process|Extension)\b"), "Add Defender exclusion",
+          match(Image,"(?i)\\\\reg\.exe$") AND match(CommandLine,"(?i)\sadd\b") AND match(CommandLine,"(?i)Windows Defender") AND match(CommandLine,"(?i)(DisableAntiSpyware|DisableAntiVirus|DisableRealtimeMonitoring)"), "Disable Defender via registry policy (reg add)",
+          (match(Image,"(?i)\\\\(sc|net|net1)\.exe$") OR match(CommandLine,"(?i)\bStop-Service\b")) AND match(CommandLine,"(?i)(WinDefend|WdNisSvc|Sense|SecurityHealthService)\b"), "Stop a Defender service",
+          match(Image,"(?i)\\\\MpCmdRun\.exe$") AND match(CommandLine,"(?i)-RemoveDefinitions"), "Remove Defender signatures (MpCmdRun)"
+        )
+      | where isnotnull(method)
+      | eval acct=coalesce(mvindex(mvfilter(User!="NOT_TRANSLATED"),0), User)
+      | table _time host acct method Image ParentImage CommandLine ParentCommandLine
+      | sort - _time
+
+  - id: T1070.001
+    name: Clear Windows Event Logs
+    tactic: Defense Evasion
+    severity: High
+    doc: T1070.001-clear-event-logs.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint (
+          (sourcetype="WinEventLog:Security" EventCode=1102)
+          OR (sourcetype="WinEventLog:System" EventCode=104)
+      )
+      | rex field=_raw "(?i)The\s+(?<cleared_channel>[\w/\- ]+?)\s+log\s+file\s+was\s+cleared"
+      | eval cleared_log=case(
+          EventCode=1102, "Security (audit log)",
+          EventCode=104,  coalesce(cleared_channel, "non-Security log"),
+          1=1,            "unknown"
+        )
+      | eval method=if(EventCode=1102, "Security audit log cleared (EID 1102)", "Event log cleared (System EID 104)")
+      | eval clear_sid=coalesce(Security_ID, Sid)
+      | eval account=coalesce(Domain_Name."\\".Account_Name, Account_Name, clear_sid)
+      | table _time host account clear_sid cleared_log method EventCode
+      | sort - _time
+
+  - id: T1003.001
+    name: LSASS Memory Access
+    tactic: Credential Access
+    severity: Critical
+    doc: T1003.001-lsass-access.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=10
+      TargetImage="*\\lsass.exe"
+      | where NOT SourceImage IN (
+          "C:\\Windows\\System32\\wininit.exe",
+          "C:\\Windows\\System32\\csrss.exe",
+          "C:\\Windows\\System32\\services.exe",
+          "C:\\Windows\\System32\\svchost.exe",
+          "C:\\Windows\\System32\\MsMpEng.exe",
+          "C:\\Program Files\\Windows Defender\\MsMpEng.exe")
+      | where match(GrantedAccess, "(?i)^0x(1010|1410|1438|143a|1fffff)$")
+         OR match(CallTrace, "(?i)(comsvcs\.dll|dbghelp\.dll|dbgcore\.dll|UNKNOWN)")
+      | table _time host SourceImage SourceProcessId TargetImage GrantedAccess CallTrace
+      | sort - _time
+
+  - id: T1003.002
+    name: SAM Credential Access
+    tactic: Credential Access
+    severity: High
+    doc: T1003.002-sam-credential-access.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (CommandLine="*sam*" OR CommandLine="*system*" OR CommandLine="*security*"
+       OR CommandLine="*esentutl*" OR CommandLine="*HarddiskVolumeShadowCopy*" OR CommandLine="*\\config\\*")
+      | eval method=case(
+          match(Image,"(?i)\\\\reg\.exe$") AND match(CommandLine,"(?i)\s(save|export)\b") AND match(CommandLine,"(?i)\bhk(lm|ey_local_machine)\\\\(sam|system|security)\b"),
+              "reg "+if(match(CommandLine,"(?i)\ssave\b"),"save","export")+" of a registry hive",
+          match(Image,"(?i)\\\\esentutl\.exe$") AND match(CommandLine,"(?i)/vss") AND match(CommandLine,"(?i)(\\\\config\\\\(SAM|SYSTEM|SECURITY)|\bSAM\b)"),
+              "esentutl VSS hive copy",
+          match(Image,"(?i)\\\\certutil\.exe$") AND match(CommandLine,"(?i)HarddiskVolumeShadowCopy") AND match(CommandLine,"(?i)(SAM|SYSTEM|SECURITY)"),
+              "certutil shadow-copy hive read (HiveNightmare)",
+          match(CommandLine,"(?i)HarddiskVolumeShadowCopy.*\\\\config\\\\(SAM|SYSTEM|SECURITY)"),
+              "shadow-copy hive read (HiveNightmare)"
+        )
+      | where isnotnull(method)
+      | eval hive=case(
+          match(CommandLine,"(?i)\bsam\b"),"SAM",
+          match(CommandLine,"(?i)\bsystem\b"),"SYSTEM",
+          match(CommandLine,"(?i)\bsecurity\b"),"SECURITY",
+          1=1,"?")
+      | eval acct=coalesce(mvindex(mvfilter(User!="NOT_TRANSLATED"),0), User)
+      | table _time host acct method hive Image ParentImage CommandLine
+      | sort - _time
+
+  - id: T1110.003
+    name: Password Spraying
+    tactic: Credential Access
+    severity: Medium to Critical
+    doc: T1110.003-password-spraying.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype=WinEventLog EventCode=4625 Logon_Type=3
+      | eval target=mvindex(mvfilter(Account_Name!="-"),0)
+      | where isnotnull(target)
+      | bin _time span=5m
+      | stats dc(target) as distinct_targets values(target) as targets count as failures by _time src
+      | where distinct_targets >= 3
+      | sort - _time
+
+  - id: T1087.001
+    name: Account Discovery
+    tactic: Discovery
+    severity: Low-Medium
+    doc: T1087-account-discovery.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (Image="*\\net.exe" OR Image="*\\net1.exe" OR Image="*\\whoami.exe" OR Image="*\\query.exe" OR Image="*\\quser.exe" OR Image="*\\wmic.exe" OR Image="*\\powershell.exe")
+      | eval discovery_cmd=case(
+          match(Image, "(?i)\\\\net1?\.exe$") AND match(CommandLine, "(?i)\s(user|localgroup|group|accounts)\b"), "net account",
+          match(Image, "(?i)\\\\whoami\.exe$"), "whoami",
+          match(Image, "(?i)\\\\quser\.exe$") OR (match(Image, "(?i)\\\\query\.exe$") AND match(CommandLine, "(?i)\suser\b")), "query user",
+          match(Image, "(?i)\\\\wmic\.exe$") AND match(CommandLine, "(?i)\s(useraccount|group)\b"), "wmic account",
+          match(CommandLine, "(?i)Get-Local(User|Group|GroupMember)"), "ps Get-Local*",
+          match(CommandLine, "(?i)(Get-AdUser|Get-AdGroup|Get-AdGroupMember)"), "ps Get-Ad* (domain)",
+          1=1, null())
+      | where isnotnull(discovery_cmd)
+      | table _time host User ParentImage Image discovery_cmd CommandLine
+      | sort - _time
+
+  - id: T1082
+    name: System Information Discovery
+    tactic: Discovery
+    severity: Low-Medium
+    doc: T1082-system-info-discovery.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1
+      (Image="*\\systeminfo.exe" OR Image="*\\hostname.exe" OR Image="*\\fsutil.exe" OR Image="*\\wmic.exe" OR Image="*\\reg.exe" OR Image="*\\powershell.exe")
+      | eval discovery_cmd=case(
+          match(Image, "(?i)\\\\systeminfo\.exe$"), "systeminfo",
+          match(Image, "(?i)\\\\hostname\.exe$"), "hostname",
+          match(Image, "(?i)\\\\fsutil\.exe$") AND match(CommandLine, "(?i)fsinfo"), "fsutil fsinfo",
+          match(Image, "(?i)\\\\wmic\.exe$") AND match(CommandLine, "(?i)\s(os|computersystem|bios|qfe|csproduct|cpu|baseboard|diskdrive|memphysical|win32_)"), "wmic system",
+          match(Image, "(?i)\\\\reg\.exe$") AND match(CommandLine, "(?i)query.*(CurrentVersion|BIOS|SystemBios|HardwareConfig)"), "reg query version/bios",
+          match(CommandLine, "(?i)Get-(WmiObject|CimInstance).*Win32_(OperatingSystem|ComputerSystem|BIOS|Processor)"), "ps Get-Wmi system",
+          1=1, null())
+      | where isnotnull(discovery_cmd)
+      | table _time host User ParentImage Image discovery_cmd CommandLine
+      | sort - _time
+
+  - id: T1021.002
+    name: SMB Admin Shares / smbexec
+    tactic: Lateral Movement
+    severity: Critical
+    doc: T1021.002-smb-admin-shares.md
+    expect_hits: true   # validation events exist in index=endpoint (subject to retention)
+    search: |
+      index=endpoint sourcetype=WinEventLog LogName=System EventCode=7045
+      | eval cmd=coalesce(service_path, Service_File_Name)
+      | where match(cmd, "(?i)(%COMSPEC%|cmd(\.exe)?|powershell)")
+      | where match(cmd, "(?i)(/c |\.bat|&|2\^?>)")
+      | table _time host service_name Service_Account cmd
+      | sort - _time
+
